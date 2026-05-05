@@ -1,0 +1,84 @@
+[assembly: System.Reflection.AssemblyMetadata("RepositoryUrl", "https://github.com/koreforger/KoreForge.SwaggerControllers")]
+[assembly: System.Runtime.Versioning.TargetFramework(".NETCoreApp,Version=v10.0", FrameworkDisplayName=".NET 10.0")]
+namespace KoreForge.SwaggerControllers
+{
+    public sealed class AuthDelegatingHandler : System.Net.Http.DelegatingHandler
+    {
+        public AuthDelegatingHandler(Microsoft.Extensions.Options.IOptionsMonitor<KoreForge.SwaggerControllers.ExternalAuthOptions> options) { }
+        protected override System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken cancellationToken) { }
+    }
+    public enum AuthMode
+    {
+        JwtOnly = 0,
+        ClientCredentials = 1,
+        Both = 2,
+    }
+    public static class ControllerRegistration
+    {
+        public static Microsoft.Extensions.DependencyInjection.IMvcBuilder AddSwaggerControllers(this Microsoft.Extensions.DependencyInjection.IMvcBuilder builder, System.Reflection.Assembly assembly) { }
+        public static Microsoft.Extensions.DependencyInjection.IMvcBuilder AddSwaggerControllers<TMarker>(this Microsoft.Extensions.DependencyInjection.IMvcBuilder builder) { }
+    }
+    public sealed class DefaultPrincipalRoleResolver : KoreForge.SwaggerControllers.IPrincipalRoleResolver
+    {
+        public DefaultPrincipalRoleResolver() { }
+        public System.Collections.Generic.IReadOnlyCollection<string> GetRoles(System.Security.Claims.ClaimsPrincipal user) { }
+    }
+    public sealed class ErrorInfo : System.IEquatable<KoreForge.SwaggerControllers.ErrorInfo>
+    {
+        public ErrorInfo(KoreForge.SwaggerControllers.ErrorOrigin Origin, KoreForge.SwaggerControllers.ErrorKind Kind, string Message, KoreForge.SwaggerControllers.ExternalErrorDetail? External = null) { }
+        public KoreForge.SwaggerControllers.ExternalErrorDetail? External { get; init; }
+        public KoreForge.SwaggerControllers.ErrorKind Kind { get; init; }
+        public string Message { get; init; }
+        public KoreForge.SwaggerControllers.ErrorOrigin Origin { get; init; }
+    }
+    public enum ErrorKind
+    {
+        Authorization = 0,
+        Technical = 1,
+        Logical = 2,
+    }
+    public enum ErrorOrigin
+    {
+        Internal = 0,
+        External = 1,
+    }
+    public sealed class ExternalAuthOptions
+    {
+        public ExternalAuthOptions() { }
+        public string? ClientId { get; set; }
+        public string ClientIdHeader { get; set; }
+        public string? ClientSecret { get; set; }
+        public string ClientSecretHeader { get; set; }
+        public string JwtHeader { get; set; }
+        public string? JwtToken { get; set; }
+        public KoreForge.SwaggerControllers.AuthMode Mode { get; set; }
+    }
+    public sealed class ExternalErrorDetail : System.IEquatable<KoreForge.SwaggerControllers.ExternalErrorDetail>
+    {
+        public ExternalErrorDetail(int? StatusCode, string? Body, string? UpstreamCorrelationId) { }
+        public string? Body { get; init; }
+        public int? StatusCode { get; init; }
+        public string? UpstreamCorrelationId { get; init; }
+    }
+    public interface IPrincipalRoleResolver
+    {
+        System.Collections.Generic.IReadOnlyCollection<string> GetRoles(System.Security.Claims.ClaimsPrincipal user);
+    }
+    public static class OutcomeExtensions
+    {
+        public static Microsoft.AspNetCore.Mvc.IActionResult ToActionResult<T>(this KoreForge.SwaggerControllers.Outcome<T> outcome) { }
+    }
+    public sealed class Outcome<T>
+    {
+        public string CorrelationId { get; }
+        public T Data { get; }
+        public KoreForge.SwaggerControllers.ErrorInfo? Error { get; }
+        public bool Success { get; }
+        public static KoreForge.SwaggerControllers.Outcome<T> Fail(KoreForge.SwaggerControllers.ErrorInfo error, string correlationId) { }
+        public static KoreForge.SwaggerControllers.Outcome<T> Ok(T data, string correlationId) { }
+    }
+    public sealed class Unit
+    {
+        public static readonly KoreForge.SwaggerControllers.Unit Value;
+    }
+}
