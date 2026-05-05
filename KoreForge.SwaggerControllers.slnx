@@ -5,6 +5,7 @@
   </Folder>
   <Folder Name="/tst/">
     <Project Path="tst/KoreForge.SwaggerControllers.Abstractions.Tests/KoreForge.SwaggerControllers.Abstractions.Tests.csproj" />
+    <Project Path="tst/KoreForge.SwaggerControllers.Template.Tests/KoreForge.SwaggerControllers.Template.Tests.csproj" />
   </Folder>
   <Folder Name="/templates/" />
 </Solution>
