@@ -1,0 +1,108 @@
+{
+  "apiName": "Sample",
+  "version": 1,
+  "basePath": "/sample/v1",
+  "operations": [
+    {
+      "name": "ListWidgets",
+      "httpMethod": "GET",
+      "route": "widgets",
+      "summary": "List widgets.",
+      "parameters": [
+        {
+          "name": "pageSize",
+          "originalName": "pageSize",
+          "in": "query",
+          "required": false,
+          "type": "int",
+          "description": ""
+        }
+      ],
+      "requestBody": null,
+      "responses": [
+        {
+          "statusCode": 200,
+          "type": "IReadOnlyList<Widget>",
+          "description": "OK"
+        }
+      ],
+      "successResponse": {
+        "statusCode": 200,
+        "type": "IReadOnlyList<Widget>"
+      },
+      "headers": []
+    },
+    {
+      "name": "CreateWidget",
+      "httpMethod": "POST",
+      "route": "widgets",
+      "summary": "Create a widget.",
+      "parameters": [],
+      "requestBody": {
+        "type": "WidgetRequest",
+        "required": true,
+        "description": ""
+      },
+      "responses": [
+        {
+          "statusCode": 201,
+          "type": "Widget",
+          "description": "Created"
+        }
+      ],
+      "successResponse": {
+        "statusCode": 201,
+        "type": "Widget"
+      },
+      "headers": []
+    },
+    {
+      "name": "GetWidget",
+      "httpMethod": "GET",
+      "route": "widgets/{id}",
+      "summary": "Fetch a widget by id.",
+      "parameters": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "description": ""
+        }
+      ],
+      "requestBody": null,
+      "responses": [
+        {
+          "statusCode": 200,
+          "type": "Widget",
+          "description": "OK"
+        }
+      ],
+      "successResponse": {
+        "statusCode": 200,
+        "type": "Widget"
+      },
+      "headers": []
+    }
+  ],
+  "dtos": [
+    {
+      "name": "Widget",
+      "summary": "",
+      "properties": [
+        { "name": "Id",          "originalName": "id",          "type": "string", "required": true,  "description": "" },
+        { "name": "Name",        "originalName": "name",        "type": "string", "required": true,  "description": "" },
+        { "name": "Description", "originalName": "description", "type": "string", "required": false, "description": "" }
+      ]
+    },
+    {
+      "name": "WidgetRequest",
+      "summary": "",
+      "properties": [
+        { "name": "Name",        "originalName": "name",        "type": "string", "required": true,  "description": "" },
+        { "name": "Description", "originalName": "description", "type": "string", "required": false, "description": "" }
+      ]
+    }
+  ]
+}
