@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/KoreForge.SwaggerControllers.Abstractions/KoreForge.SwaggerControllers.Abstractions.csproj" />
+    <Project Path="src/KoreForge.SwaggerControllers.Template/KoreForge.SwaggerControllers.Template.csproj" />
   </Folder>
   <Folder Name="/tst/">
     <Project Path="tst/KoreForge.SwaggerControllers.Abstractions.Tests/KoreForge.SwaggerControllers.Abstractions.Tests.csproj" />

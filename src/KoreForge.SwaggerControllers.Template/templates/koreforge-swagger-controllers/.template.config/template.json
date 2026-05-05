@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "KoreForge",
+  "classifications": [ "Library", "Web", "Swagger", "KoreForge" ],
+  "identity": "KoreForge.SwaggerControllers",
+  "name": "KoreForge Swagger Controllers Library",
+  "shortName": "koreforge-swagger-controllers",
+  "description": "Scaffolds a multi-API controller library repo driven by Swagger 2.0 input files, with the parse-swagger Copilot skill bundled and a PowerShell 7 Stage-2 generator.",
+  "sourceName": "MyCompany.External.Apis",
+  "preferNameDirectory": true,
+  "tags": {
+    "language": "C#",
+    "type": "solution"
+  },
+  "symbols": {
+    "RootNamespace": {
+      "type": "parameter",
+      "datatype": "string",
+      "description": "Root namespace and assembly prefix for every generated project (e.g. MyCompany.External.Apis).",
+      "defaultValue": "MyCompany.External.Apis",
+      "replaces": "MyCompany.External.Apis",
+      "fileRename": "MyCompany.External.Apis"
+    },
+    "IncludeSampleSwagger": {
+      "type": "parameter",
+      "datatype": "bool",
+      "description": "Include the bundled Sample/v1/swagger.yml fixture so the generator has something to chew on.",
+      "defaultValue": "false"
+    }
+  },
+  "sources": [
+    {
+      "rename": {
+        "scr/generate.ps1.txt": "scr/generate.ps1",
+        "scr/build-clean.ps1.txt": "scr/build-clean.ps1",
+        "scr/build-rebuild.ps1.txt": "scr/build-rebuild.ps1",
+        "scr/build-test.ps1.txt": "scr/build-test.ps1",
+        "scr/build-pack.ps1.txt": "scr/build-pack.ps1",
+        "scr/koreforge-build.psm1.txt": "scr/koreforge-build.psm1"
+      },
+      "modifiers": [
+        {
+          "condition": "(!IncludeSampleSwagger)",
+          "exclude": [ "swaggers/Sample/**" ]
+        }
+      ],
+      "exclude": [
+        ".template.config/**",
+        "**/bin/**",
+        "**/obj/**",
+        "**/artifacts/**",
+        "**/.vs/**",
+        "**/*.user",
+        "**/TestResults/**"
+      ]
+    }
+  ],
+  "postActions": [
+    {
+      "description": "Restore NuGet packages",
+      "manualInstructions": [ { "text": "Run 'dotnet restore'" } ],
+      "actionId": "210D431B-A78B-4D2F-B762-4ED3E3EA9025",
+      "args": {
+        "files": [ "src/**/*.csproj", "tst/**/*.csproj" ]
+      },
+      "continueOnError": true
+    }
+  ]
+}

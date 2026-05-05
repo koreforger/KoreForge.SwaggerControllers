@@ -1,0 +1,12 @@
+# Build artefacts (per workspace policy: artefacts/ is the only persisted output root).
+[Bb]in/
+[Oo]bj/
+artifacts/
+TestResults/
+coverage/
+.vs/
+*.user
+*.suo
+
+# Generated files emitted by scr/generate.ps1 are committed (Generated/*.g.cs).
+# Hand-written scaffolded files alongside them are also committed.

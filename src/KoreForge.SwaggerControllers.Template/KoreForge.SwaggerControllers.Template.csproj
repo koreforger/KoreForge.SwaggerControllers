@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageType>Template</PackageType>
+    <PackageId>KoreForge.SwaggerControllers</PackageId>
+    <Title>KoreForge Swagger Controllers Library</Title>
+    <Description>dotnet new template that scaffolds a multi-API library repo for KoreForge.SwaggerControllers, including the parse-swagger Copilot skill and the Stage-2 PowerShell generator.</Description>
+    <PackageTags>koreforge;swagger;controllers;template;dotnet-new;refit;outcome</PackageTags>
+
+    <TargetFramework>net10.0</TargetFramework>
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+    <IncludeContentInPack>true</IncludeContentInPack>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <IsPackable>true</IsPackable>
+    <NoWarn>$(NoWarn);CS2008;NU5128</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="templates\koreforge-swagger-controllers\**\*"
+             Exclude="templates\koreforge-swagger-controllers\**\bin\**;
+                      templates\koreforge-swagger-controllers\**\obj\**;
+                      templates\koreforge-swagger-controllers\**\artifacts\**;
+                      templates\koreforge-swagger-controllers\**\.vs\**;
+                      templates\koreforge-swagger-controllers\**\*.user;
+                      templates\koreforge-swagger-controllers\**\TestResults\**">
+      <PackagePath>content/koreforge-swagger-controllers/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
+    </Content>
+  </ItemGroup>
+
+</Project>

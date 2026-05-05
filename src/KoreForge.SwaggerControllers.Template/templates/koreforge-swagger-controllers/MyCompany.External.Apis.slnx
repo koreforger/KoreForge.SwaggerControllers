@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MyCompany.External.Apis.AssemblyMarker/MyCompany.External.Apis.AssemblyMarker.csproj" />
+  </Folder>
+  <Folder Name="/tst/">
+    <Project Path="tst/MyCompany.External.Apis.Tests/MyCompany.External.Apis.Tests.csproj" />
+  </Folder>
+  <Folder Name="/swaggers/" />
+</Solution>

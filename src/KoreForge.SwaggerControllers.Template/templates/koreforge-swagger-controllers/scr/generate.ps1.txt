@@ -1,0 +1,9 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+Write-Host 'TODO: scr/generate.ps1 will be ported in KoreForge.SwaggerControllers Phase 4.' -ForegroundColor Yellow
+Write-Host 'For now, drop swaggers/<ApiName>/v<N>/swagger.yml, run the parse-swagger skill,' -ForegroundColor Yellow
+Write-Host 'and wait for the generator to ship.' -ForegroundColor Yellow
