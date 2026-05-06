@@ -28,17 +28,10 @@ public sealed class Outcome<T>
     public string CorrelationId { get; }
 
     /// <summary>Construct a success outcome.</summary>
-    public static Outcome<T> Ok(T data, string correlationId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(correlationId);
-        return new Outcome<T>(success: true, data: data, error: null, correlationId: correlationId);
-    }
+    public static Outcome<T> Ok(T data, string correlationId) =>
+        new(success: true, data: data, error: null, correlationId: correlationId);
 
     /// <summary>Construct a failure outcome.</summary>
-    public static Outcome<T> Fail(ErrorInfo error, string correlationId)
-    {
-        ArgumentNullException.ThrowIfNull(error);
-        ArgumentException.ThrowIfNullOrWhiteSpace(correlationId);
-        return new Outcome<T>(success: false, data: default, error: error, correlationId: correlationId);
-    }
+    public static Outcome<T> Fail(ErrorInfo error, string correlationId) =>
+        new(success: false, data: default, error: error, correlationId: correlationId);
 }

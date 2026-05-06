@@ -23,13 +23,14 @@ namespace KoreForge.SwaggerControllers
         public DefaultPrincipalRoleResolver() { }
         public System.Collections.Generic.IReadOnlyCollection<string> GetRoles(System.Security.Claims.ClaimsPrincipal user) { }
     }
-    public sealed class ErrorInfo : System.IEquatable<KoreForge.SwaggerControllers.ErrorInfo>
+    public sealed class ErrorInfo
     {
-        public ErrorInfo(KoreForge.SwaggerControllers.ErrorOrigin Origin, KoreForge.SwaggerControllers.ErrorKind Kind, string Message, KoreForge.SwaggerControllers.ExternalErrorDetail? External = null) { }
-        public KoreForge.SwaggerControllers.ExternalErrorDetail? External { get; init; }
-        public KoreForge.SwaggerControllers.ErrorKind Kind { get; init; }
-        public string Message { get; init; }
-        public KoreForge.SwaggerControllers.ErrorOrigin Origin { get; init; }
+        public ErrorInfo() { }
+        public required string Code { get; init; }
+        public KoreForge.SwaggerControllers.ExternalErrorDetail? ExternalDetail { get; init; }
+        public required KoreForge.SwaggerControllers.ErrorKind Kind { get; init; }
+        public required string Message { get; init; }
+        public required KoreForge.SwaggerControllers.ErrorOrigin Origin { get; init; }
     }
     public enum ErrorKind
     {
@@ -53,16 +54,21 @@ namespace KoreForge.SwaggerControllers
         public string? JwtToken { get; set; }
         public KoreForge.SwaggerControllers.AuthMode Mode { get; set; }
     }
-    public sealed class ExternalErrorDetail : System.IEquatable<KoreForge.SwaggerControllers.ExternalErrorDetail>
+    public sealed class ExternalErrorDetail
     {
-        public ExternalErrorDetail(int? StatusCode, string? Body, string? UpstreamCorrelationId) { }
-        public string? Body { get; init; }
-        public int? StatusCode { get; init; }
-        public string? UpstreamCorrelationId { get; init; }
+        public ExternalErrorDetail() { }
+        public required string DependencyName { get; init; }
+        public int? HttpStatusCode { get; init; }
+        public string? RawResponse { get; init; }
     }
     public interface IPrincipalRoleResolver
     {
         System.Collections.Generic.IReadOnlyCollection<string> GetRoles(System.Security.Claims.ClaimsPrincipal user);
+    }
+    public static class LogHelper
+    {
+        public static void LogExceptionStructured(this Microsoft.Extensions.Logging.ILogger logger, System.Exception ex, string className, string methodName, string operationKey, string correlationId, System.Collections.Generic.Dictionary<string, object?>? additionalFields = null) { }
+        public static void LogOutcomeStructured<T>(this Microsoft.Extensions.Logging.ILogger logger, KoreForge.SwaggerControllers.Outcome<T> outcome, string className, string methodName, string operationKey) { }
     }
     public static class OutcomeExtensions
     {

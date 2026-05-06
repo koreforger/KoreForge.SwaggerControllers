@@ -4,646 +4,793 @@
 
 .DESCRIPTION
   Reads every swaggers/<ApiName>/v<N>/metadata.json file under the repo and
-  (re)emits the strongly-typed Generated/ tree for the matching project under
-  src/<RootNamespace>.<ApiName>.V<N>/. Hand-written scaffold files are emitted
-  once and never overwritten.
+  (re)emits the strongly-typed Generated/ tree for each API library under src/.
+  Scaffolded files (decorators, ServiceCollectionExtensions, .csproj) are emitted
+  once and never overwritten. Run this after adding or updating metadata.json files.
+
+.NOTES
+  Requires PowerShell 7+. No external modules needed.
+  metadata.json must follow the KoreForge.SwaggerControllers metadata schema.
 #>
-[CmdletBinding()]
+
 param(
-    [string]$RootNamespace,
-    [string]$RepoRoot
+    [string]$RepoRoot = (Split-Path $PSScriptRoot -Parent)
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not $RepoRoot) {
-    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-}
+$swaggersDir = Join-Path $RepoRoot 'swaggers'
+$srcDir      = Join-Path $RepoRoot 'src'
+$tstDir      = Join-Path $RepoRoot 'tst'
 
-if (-not $RootNamespace) {
-    $slnx = Get-ChildItem -Path $RepoRoot -Filter '*.slnx' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $slnx) { throw "No *.slnx found in $RepoRoot. Pass -RootNamespace explicitly." }
-    $RootNamespace = $slnx.BaseName
-}
-
-$swaggersRoot = Join-Path $RepoRoot 'swaggers'
-$srcRoot      = Join-Path $RepoRoot 'src'
-
-if (-not (Test-Path $swaggersRoot)) {
-    Write-Host "No swaggers/ directory at $swaggersRoot; nothing to generate." -ForegroundColor Yellow
-    return
-}
-
-$metadataFiles = @(Get-ChildItem -Path $swaggersRoot -Filter 'metadata.json' -Recurse -File)
-if ($metadataFiles.Count -eq 0) {
-    Write-Host "No metadata.json files found under $swaggersRoot; run the parse-swagger skill first." -ForegroundColor Yellow
-    return
-}
-
-# ----------------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------------
-
+# ─────────────────────────────────────────────
+# Helper: Write-FileIfChanged — avoids unnecessary writes
+# ─────────────────────────────────────────────
 function Write-FileIfChanged {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Content)
+    param([string]$Path, [string]$Content)
     $dir = Split-Path $Path -Parent
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $Content = $Content -replace "`r`n", "`n"
     if (Test-Path $Path) {
-        $existing = [System.IO.File]::ReadAllText($Path)
-        if ($existing -eq $Content) { return $false }
+        $existing = (Get-Content $Path -Raw -ErrorAction SilentlyContinue) -replace "`r`n", "`n"
+        if ($existing -eq $Content) { return }
     }
-    [System.IO.File]::WriteAllText($Path, $Content)
-    return $true
+    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.Encoding]::UTF8)
+    Write-Host "  wrote: $Path"
 }
 
-function Write-FileOnce {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Content)
-    if (Test-Path $Path) { return $false }
-    $dir = Split-Path $Path -Parent
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    [System.IO.File]::WriteAllText($Path, $Content)
-    return $true
-}
-
-function ConvertTo-KebabCase {
-    param([Parameter(Mandatory)][string]$Value)
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    return ([Regex]::Replace($Value, '([a-z0-9])([A-Z])', '$1-$2')).ToLowerInvariant()
-}
-
-function Get-NonHeaderParameters {
-    param($Operation)
-    return @($Operation.parameters | Where-Object { $_.in -ne 'header' -and $_.in -ne 'body' })
-}
-
-function Get-HeaderParameters {
-    param($Operation)
-    return @($Operation.parameters | Where-Object { $_.in -eq 'header' })
-}
-
-function Get-RefitVerbAttribute {
-    param([string]$Verb)
-    switch ($Verb.ToUpperInvariant()) {
-        'GET'    { 'Get' }
-        'POST'   { 'Post' }
-        'PUT'    { 'Put' }
-        'DELETE' { 'Delete' }
-        'PATCH'  { 'Patch' }
-        'HEAD'   { 'Head' }
-        'OPTIONS'{ 'Options' }
-        default  { throw "Unsupported HTTP method: $Verb" }
+# ─────────────────────────────────────────────
+# Helper: Build Refit attribute for an operation
+# ─────────────────────────────────────────────
+function Get-RefitAttribute($Op) {
+    $method = $Op.httpMethod
+    $path   = $Op.pathTemplate
+    switch ($method.ToUpper()) {
+        'GET'    { return "[Get(`"$path`")]" }
+        'POST'   { return "[Post(`"$path`")]" }
+        'PUT'    { return "[Put(`"$path`")]" }
+        'DELETE' { return "[Delete(`"$path`")]" }
+        'PATCH'  { return "[Patch(`"$path`")]" }
+        default  { return "[Get(`"$path`")]" }
     }
 }
 
-function Get-MvcVerbAttribute {
-    param([string]$Verb)
-    switch ($Verb.ToUpperInvariant()) {
-        'GET'    { 'HttpGet' }
-        'POST'   { 'HttpPost' }
-        'PUT'    { 'HttpPut' }
-        'DELETE' { 'HttpDelete' }
-        'PATCH'  { 'HttpPatch' }
-        'HEAD'   { 'HttpHead' }
-        'OPTIONS'{ 'HttpOptions' }
-        default  { throw "Unsupported HTTP method: $Verb" }
-    }
-}
-
-function Get-SuccessType {
-    param($Operation)
-    if ($Operation.PSObject.Properties['successResponse'] -and $Operation.successResponse `
-        -and $Operation.successResponse.PSObject.Properties['type'] -and $Operation.successResponse.type) {
-        return [string]$Operation.successResponse.type
-    }
-    return $null
-}
-
-function Get-ServiceReturnType {
-    param($Operation)
-    $t = Get-SuccessType $Operation
-    if ($t) { return "Task<Outcome<$t>>" }
-    return 'Task<Outcome<Unit>>'
-}
-
-function Format-XmlSummary {
-    param([string]$Text, [string]$Indent = '    ')
-    if ([string]::IsNullOrWhiteSpace($Text)) { return "$Indent/// <summary />" }
-    $escaped = $Text.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
-    $lines = $escaped -split "`r?`n"
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine("$Indent/// <summary>")
-    foreach ($line in $lines) { [void]$sb.AppendLine("$Indent/// $line") }
-    [void]$sb.Append("$Indent/// </summary>")
-    return $sb.ToString()
-}
-
-function Get-ServiceParamList {
-    param($Operation, [switch]$IncludeForwardArgs)
-    $params = New-Object System.Collections.Generic.List[string]
-    $args = New-Object System.Collections.Generic.List[string]
-    foreach ($p in (Get-NonHeaderParameters $Operation)) {
-        $params.Add("$($p.type) $($p.name)")
-        $args.Add($p.name)
-    }
-    if ($Operation.PSObject.Properties['requestBody'] -and $Operation.requestBody) {
-        $params.Add("$($Operation.requestBody.type) request")
-        $args.Add('request')
-    }
-    $params.Add('string correlationId')
-    $params.Add('CancellationToken cancellationToken = default')
-    $args.Add('correlationId')
-    $args.Add('cancellationToken')
-    if ($IncludeForwardArgs) { return @{ Params = ($params -join ', '); Args = ($args -join ', ') } }
-    return ($params -join ', ')
-}
-
-# ----------------------------------------------------------------------------
-# Emitters
-# ----------------------------------------------------------------------------
-
-function Emit-Dto {
-    param($Dto, [string]$Namespace)
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine('using System.Collections.Generic;')
-    [void]$sb.AppendLine('using System.Text.Json.Serialization;')
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("namespace $Namespace.Dtos;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine((Format-XmlSummary $Dto.summary ''))
-    [void]$sb.AppendLine("public sealed class $($Dto.name)")
-    [void]$sb.AppendLine('{')
-    $first = $true
-    foreach ($prop in $Dto.properties) {
-        if (-not $first) { [void]$sb.AppendLine() }
-        $first = $false
-        [void]$sb.AppendLine((Format-XmlSummary $prop.description '    '))
-        [void]$sb.AppendLine("    [JsonPropertyName(`"$($prop.originalName)`")]")
-        $type = $prop.type
-        $modifier = ''
-        if (-not $prop.required) {
-            if ($type -notmatch '\?$' -and $type -notmatch '^IReadOnly') { $type = "${type}?" }
+# ─────────────────────────────────────────────
+# Helper: Build method signature parameters
+# ─────────────────────────────────────────────
+function Get-ServiceMethodParams($Op) {
+    $parts = @()
+    foreach ($p in $Op.parameters) {
+        if ($p.in -eq 'header') { continue }
+        if ($p.isBodyParam) {
+            $parts += "$($p.csharpType) request"
         } else {
-            $modifier = 'required '
+            $camel = $p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1)
+            $parts += "$($p.csharpType) $camel"
         }
-        [void]$sb.AppendLine("    public ${modifier}$type $($prop.name) { get; set; }")
     }
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
+    $parts += "CancellationToken cancellationToken = default"
+    return $parts -join ', '
 }
 
-function Emit-RefitClient {
-    param($Metadata, [string]$Namespace)
-    $apiName = $Metadata.apiName
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine('using System.Collections.Generic;')
-    [void]$sb.AppendLine('using System.Net.Http;')
-    [void]$sb.AppendLine('using System.Threading;')
-    [void]$sb.AppendLine('using System.Threading.Tasks;')
-    [void]$sb.AppendLine('using Refit;')
-    [void]$sb.AppendLine("using $Namespace.Dtos;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("namespace $Namespace;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("public interface I${apiName}ExternalClient")
-    [void]$sb.AppendLine('{')
-    $first = $true
-    foreach ($op in $Metadata.operations) {
-        if (-not $first) { [void]$sb.AppendLine() }
-        $first = $false
-        $route = $op.route
-        if (-not $route.StartsWith('/')) { $route = "/$route" }
-        $verb = Get-RefitVerbAttribute $op.httpMethod
-        [void]$sb.AppendLine("    [$verb(`"$route`")]")
-        $params = New-Object System.Collections.Generic.List[string]
-        foreach ($p in (Get-NonHeaderParameters $op)) {
-            $attr = switch ($p.in) {
-                'path'     { "[AliasAs(`"$($p.originalName)`")]" }
-                'query'    { "[Query, AliasAs(`"$($p.originalName)`")]" }
-                'formData' { "[Query, AliasAs(`"$($p.originalName)`")]" }
-                default    { '' }
-            }
-            $params.Add(("$attr $($p.type) $($p.name)").Trim())
-        }
-        if ($op.PSObject.Properties['requestBody'] -and $op.requestBody) {
-            $params.Add("[Body] $($op.requestBody.type) request")
-        }
-        foreach ($h in (Get-HeaderParameters $op)) {
-            $params.Add("[Header(`"$($h.originalName)`")] $($h.type) $($h.name)")
-        }
-        $params.Add('CancellationToken cancellationToken = default')
-        [void]$sb.AppendLine("    Task<HttpResponseMessage> $($op.name)Async($($params -join ', '));")
-    }
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
-}
-
-function Emit-ServiceInterface {
-    param($Metadata, [string]$Namespace)
-    $apiName = $Metadata.apiName
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine('using System.Collections.Generic;')
-    [void]$sb.AppendLine('using System.Threading;')
-    [void]$sb.AppendLine('using System.Threading.Tasks;')
-    [void]$sb.AppendLine('using KoreForge.SwaggerControllers;')
-    [void]$sb.AppendLine("using $Namespace.Dtos;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("namespace $Namespace;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("public interface I${apiName}Service")
-    [void]$sb.AppendLine('{')
-    $first = $true
-    foreach ($op in $Metadata.operations) {
-        if (-not $first) { [void]$sb.AppendLine() }
-        $first = $false
-        [void]$sb.AppendLine((Format-XmlSummary $op.summary '    '))
-        $sig = Get-ServiceParamList $op
-        [void]$sb.AppendLine("    $(Get-ServiceReturnType $op) $($op.name)Async($sig);")
-    }
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
-}
-
-function Emit-ServiceImpl {
-    param($Metadata, [string]$Namespace)
-    $apiName = $Metadata.apiName
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine('using System;')
-    [void]$sb.AppendLine('using System.Collections.Generic;')
-    [void]$sb.AppendLine('using System.Net.Http;')
-    [void]$sb.AppendLine('using System.Text.Json;')
-    [void]$sb.AppendLine('using System.Threading;')
-    [void]$sb.AppendLine('using System.Threading.Tasks;')
-    [void]$sb.AppendLine('using KoreForge.SwaggerControllers;')
-    [void]$sb.AppendLine("using $Namespace.Dtos;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("namespace $Namespace;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("public sealed class ${apiName}Service : I${apiName}Service")
-    [void]$sb.AppendLine('{')
-    [void]$sb.AppendLine("    private readonly I${apiName}ExternalClient _client;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("    public ${apiName}Service(I${apiName}ExternalClient client)")
-    [void]$sb.AppendLine('    {')
-    [void]$sb.AppendLine('        _client = client ?? throw new ArgumentNullException(nameof(client));')
-    [void]$sb.AppendLine('    }')
-    foreach ($op in $Metadata.operations) {
-        [void]$sb.AppendLine()
-        $clientArgs = New-Object System.Collections.Generic.List[string]
-        foreach ($p in (Get-NonHeaderParameters $op)) { $clientArgs.Add($p.name) }
-        if ($op.PSObject.Properties['requestBody'] -and $op.requestBody) { $clientArgs.Add('request') }
-        foreach ($h in (Get-HeaderParameters $op)) { $clientArgs.Add('default') }
-        $clientArgs.Add('cancellationToken')
-
-        $sig = Get-ServiceParamList $op
-        $args = ($clientArgs -join ', ')
-        $successType = Get-SuccessType $op
-        $resultType = if ($successType) { $successType } else { 'Unit' }
-
-        [void]$sb.AppendLine("    public async $(Get-ServiceReturnType $op) $($op.name)Async($sig)")
-        [void]$sb.AppendLine('    {')
-        [void]$sb.AppendLine('        try')
-        [void]$sb.AppendLine('        {')
-        [void]$sb.AppendLine("            using var response = await _client.$($op.name)Async($args).ConfigureAwait(false);")
-        [void]$sb.AppendLine('            if (!response.IsSuccessStatusCode)')
-        [void]$sb.AppendLine('            {')
-        [void]$sb.AppendLine('                var body = await SafeReadAsync(response, cancellationToken).ConfigureAwait(false);')
-        [void]$sb.AppendLine("                return Outcome<$resultType>.Fail(")
-        [void]$sb.AppendLine('                    new ErrorInfo(')
-        [void]$sb.AppendLine('                        ErrorOrigin.External,')
-        [void]$sb.AppendLine('                        ErrorKind.Technical,')
-        [void]$sb.AppendLine('                        $"Upstream returned {(int)response.StatusCode} {response.ReasonPhrase}.",')
-        [void]$sb.AppendLine('                        new ExternalErrorDetail((int)response.StatusCode, body, null)),')
-        [void]$sb.AppendLine('                    correlationId);')
-        [void]$sb.AppendLine('            }')
-        if ($successType) {
-            [void]$sb.AppendLine('            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);')
-            [void]$sb.AppendLine("            var data = await JsonSerializer.DeserializeAsync<$resultType>(stream, cancellationToken: cancellationToken).ConfigureAwait(false)")
-            [void]$sb.AppendLine('                ?? throw new InvalidOperationException("Upstream returned a success status with an empty body.");')
-            [void]$sb.AppendLine("            return Outcome<$resultType>.Ok(data, correlationId);")
+function Get-ServiceCallArgs($Op) {
+    $parts = @()
+    foreach ($p in $Op.parameters) {
+        if ($p.in -eq 'header') { continue }
+        if ($p.isBodyParam) {
+            $parts += "request"
         } else {
-            [void]$sb.AppendLine('            return Outcome<Unit>.Ok(Unit.Value, correlationId);')
+            $camel = $p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1)
+            $parts += $camel
         }
-        [void]$sb.AppendLine('        }')
-        [void]$sb.AppendLine('        catch (HttpRequestException ex)')
-        [void]$sb.AppendLine('        {')
-        [void]$sb.AppendLine("            return Outcome<$resultType>.Fail(new ErrorInfo(ErrorOrigin.External, ErrorKind.Technical, ex.Message), correlationId);")
-        [void]$sb.AppendLine('        }')
-        [void]$sb.AppendLine('        catch (Exception ex)')
-        [void]$sb.AppendLine('        {')
-        [void]$sb.AppendLine("            return Outcome<$resultType>.Fail(new ErrorInfo(ErrorOrigin.Internal, ErrorKind.Technical, ex.Message), correlationId);")
-        [void]$sb.AppendLine('        }')
-        [void]$sb.AppendLine('    }')
     }
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine('    private static async Task<string?> SafeReadAsync(HttpResponseMessage response, CancellationToken cancellationToken)')
-    [void]$sb.AppendLine('    {')
-    [void]$sb.AppendLine('        try { return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); }')
-    [void]$sb.AppendLine('        catch { return null; }')
-    [void]$sb.AppendLine('    }')
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
+    $parts += "cancellationToken"
+    return $parts -join ', '
 }
 
-function Emit-LoggingDecorator {
-    param($Metadata, [string]$Namespace)
-    $apiName = $Metadata.apiName
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine('using System;')
-    [void]$sb.AppendLine('using System.Collections.Generic;')
-    [void]$sb.AppendLine('using System.Threading;')
-    [void]$sb.AppendLine('using System.Threading.Tasks;')
-    [void]$sb.AppendLine('using KoreForge.SwaggerControllers;')
-    [void]$sb.AppendLine('using Microsoft.Extensions.Logging;')
-    [void]$sb.AppendLine("using $Namespace.Dtos;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("namespace $Namespace;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("public sealed class ${apiName}LoggingDecorator : I${apiName}Service")
-    [void]$sb.AppendLine('{')
-    [void]$sb.AppendLine("    private readonly I${apiName}Service _inner;")
-    [void]$sb.AppendLine("    private readonly ILogger<${apiName}LoggingDecorator> _logger;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("    public ${apiName}LoggingDecorator(I${apiName}Service inner, ILogger<${apiName}LoggingDecorator> logger)")
-    [void]$sb.AppendLine('    {')
-    [void]$sb.AppendLine('        _inner = inner ?? throw new ArgumentNullException(nameof(inner));')
-    [void]$sb.AppendLine('        _logger = logger ?? throw new ArgumentNullException(nameof(logger));')
-    [void]$sb.AppendLine('    }')
-    foreach ($op in $Metadata.operations) {
-        [void]$sb.AppendLine()
-        $combo = Get-ServiceParamList $op -IncludeForwardArgs
-        [void]$sb.AppendLine("    public async $(Get-ServiceReturnType $op) $($op.name)Async($($combo.Params))")
-        [void]$sb.AppendLine('    {')
-        [void]$sb.AppendLine("        _logger.LogInformation(`"[{CorrelationId}] $apiName.$($op.name) starting`", correlationId);")
-        [void]$sb.AppendLine("        var outcome = await _inner.$($op.name)Async($($combo.Args)).ConfigureAwait(false);")
-        [void]$sb.AppendLine('        if (outcome.Success)')
-        [void]$sb.AppendLine("            _logger.LogInformation(`"[{CorrelationId}] $apiName.$($op.name) succeeded`", correlationId);")
-        [void]$sb.AppendLine('        else')
-        [void]$sb.AppendLine("            _logger.LogWarning(`"[{CorrelationId}] $apiName.$($op.name) failed: {Origin}/{Kind} {Message}`", correlationId, outcome.Error!.Origin, outcome.Error.Kind, outcome.Error.Message);")
-        [void]$sb.AppendLine('        return outcome;')
-        [void]$sb.AppendLine('    }')
+function Get-RefitCallArgs($Op) {
+    $parts = @()
+    foreach ($p in $Op.parameters) {
+        if ($p.isBodyParam) {
+            $parts += "request"
+        } elseif ($p.in -eq 'header') {
+            continue
+        } elseif ($p.in -eq 'path') {
+            $parts += $p.name
+        } else {
+            $camel = $p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1)
+            $parts += $camel
+        }
     }
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
+    $parts += "cancellationToken"
+    return $parts -join ', '
 }
 
-function Emit-Controller {
-    param($Metadata, [string]$Namespace, [int]$Version)
-    $apiName = $Metadata.apiName
-    $apiKebab = ConvertTo-KebabCase $apiName
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine('using System;')
-    [void]$sb.AppendLine('using System.Collections.Generic;')
-    [void]$sb.AppendLine('using System.Threading;')
-    [void]$sb.AppendLine('using System.Threading.Tasks;')
-    [void]$sb.AppendLine('using KoreForge.SwaggerControllers;')
-    [void]$sb.AppendLine('using Microsoft.AspNetCore.Authorization;')
-    [void]$sb.AppendLine('using Microsoft.AspNetCore.Mvc;')
-    [void]$sb.AppendLine("using $Namespace.Dtos;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("namespace $Namespace;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine('[ApiController]')
-    [void]$sb.AppendLine("[Route(`"api/$apiKebab/v$Version`")]")
-    [void]$sb.AppendLine("public sealed class ${apiName}Controller : ControllerBase")
-    [void]$sb.AppendLine('{')
-    [void]$sb.AppendLine("    private readonly I${apiName}Service _service;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("    public ${apiName}Controller(I${apiName}Service service)")
-    [void]$sb.AppendLine('    {')
-    [void]$sb.AppendLine('        _service = service ?? throw new ArgumentNullException(nameof(service));')
-    [void]$sb.AppendLine('    }')
-    foreach ($op in $Metadata.operations) {
-        [void]$sb.AppendLine()
-        $verbAttr = Get-MvcVerbAttribute $op.httpMethod
-        $route = $op.route
-        if ($route -and $route.StartsWith('/')) { $route = $route.Substring(1) }
+function Get-RefitMethodParamsNoHeader($Op) {
+    $parts = @()
+    foreach ($p in $Op.parameters) {
+        if ($p.in -eq 'header') { continue }
+        if ($p.isBodyParam) {
+            $parts += "[Body] $($p.csharpType) request"
+        } elseif ($p.in -eq 'query') {
+            $parts += "[Query] $($p.csharpType) $($p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1))"
+        } elseif ($p.in -eq 'path') {
+            $parts += "$($p.csharpType) $($p.name)"
+        }
+    }
+    $parts += "CancellationToken cancellationToken = default"
+    return $parts -join ', '
+}
 
-        $params = New-Object System.Collections.Generic.List[string]
-        $forwardArgs = New-Object System.Collections.Generic.List[string]
-        foreach ($p in (Get-NonHeaderParameters $op)) {
-            $bind = switch ($p.in) {
-                'path'     { '[FromRoute] ' }
-                'query'    { '[FromQuery] ' }
-                'formData' { '[FromForm] ' }
-                default    { '' }
+function Get-ResponseType($Op) {
+    if ($Op.successResponseDtoRef) {
+        return $Op.successResponseDtoRef
+    }
+    return 'object'
+}
+
+# ─────────────────────────────────────────────
+# Collect all metadata.json files
+# ─────────────────────────────────────────────
+$metadataFiles = @(Get-ChildItem -Path $swaggersDir -Filter 'metadata.json' -Recurse | Sort-Object FullName)
+if ($metadataFiles.Count -eq 0) {
+    Write-Error "No metadata.json files found under $swaggersDir"
+    return
+}
+
+Write-Host "Found $($metadataFiles.Count) metadata.json files."
+Write-Host ""
+
+# Determine test project name from .slnx
+$slnxFile = Get-ChildItem -Path $RepoRoot -Filter '*.slnx' -File | Select-Object -First 1
+$testProjName = if ($slnxFile) { "$($slnxFile.BaseName).Tests" } else { "Tests" }
+
+$projectRefs = @()
+
+foreach ($mf in $metadataFiles) {
+    $meta     = Get-Content $mf.FullName -Raw | ConvertFrom-Json
+    $ns       = $meta.namespace
+    $apiName  = $meta.apiName
+    $version  = $meta.folderVersion
+    $kebab    = $meta.kebabName
+    $projName = $meta.projectName
+    $basePath = $meta.basePath
+
+    Write-Host "=== Generating $projName ==="
+
+    $projDir = Join-Path $srcDir $projName
+    $genDir  = Join-Path $projDir 'Generated'
+    $dtosDir = Join-Path $genDir 'Dtos'
+
+    if (Test-Path $genDir) { Remove-Item $genDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $dtosDir -Force | Out-Null
+
+    # ───────────────────────────────────────
+    # 1. Generate DTOs
+    # ───────────────────────────────────────
+    foreach ($dto in $meta.dtos) {
+        $dtoName = $dto.csharpName
+        $sb = [System.Text.StringBuilder]::new()
+        [void]$sb.AppendLine("// <auto-generated />")
+        [void]$sb.AppendLine('#nullable enable')
+        [void]$sb.AppendLine("using System.Text.Json.Serialization;")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("namespace $ns;")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("public sealed class $dtoName")
+        [void]$sb.AppendLine("{")
+        foreach ($prop in $dto.properties) {
+            $propType = $prop.csharpType
+            $isRequired = $null -ne ($prop.PSObject.Properties['required']) -and $prop.required -eq $true
+            # Non-required properties that aren't already nullable get ? suffix
+            if (-not $isRequired -and -not $propType.EndsWith('?')) {
+                $propType = "$($propType)?"
             }
-            $params.Add("$bind$($p.type) $($p.name)")
-            $forwardArgs.Add($p.name)
+            $requiredKeyword = if ($isRequired) { "required " } else { "" }
+            [void]$sb.AppendLine("    [JsonPropertyName(`"$($prop.jsonName)`")]")
+            [void]$sb.AppendLine("    public ${requiredKeyword}${propType} $($prop.csharpName) { get; set; }")
+            [void]$sb.AppendLine("")
         }
-        if ($op.PSObject.Properties['requestBody'] -and $op.requestBody) {
-            $params.Add("[FromBody] $($op.requestBody.type) request")
-            $forwardArgs.Add('request')
+        [void]$sb.AppendLine("}")
+        Write-FileIfChanged -Path (Join-Path $dtosDir "$dtoName.g.cs") -Content $sb.ToString()
+    }
+
+    # ───────────────────────────────────────
+    # 2. Generate Refit interface
+    # ───────────────────────────────────────
+    $refitSb = [System.Text.StringBuilder]::new()
+    [void]$refitSb.AppendLine("// <auto-generated />")
+    [void]$refitSb.AppendLine('#nullable enable')
+    [void]$refitSb.AppendLine("using Refit;")
+    [void]$refitSb.AppendLine("")
+    [void]$refitSb.AppendLine("namespace $ns;")
+    [void]$refitSb.AppendLine("")
+    [void]$refitSb.AppendLine("public interface I${apiName}ExternalClient")
+    [void]$refitSb.AppendLine("{")
+    foreach ($op in $meta.operations) {
+        [void]$refitSb.AppendLine("    $(Get-RefitAttribute $op)")
+        [void]$refitSb.AppendLine("    Task<$(Get-ResponseType $op)> $($op.refitMethodName)($(Get-RefitMethodParamsNoHeader $op));")
+        [void]$refitSb.AppendLine("")
+    }
+    [void]$refitSb.AppendLine("}")
+    Write-FileIfChanged -Path (Join-Path $genDir "I${apiName}ExternalClient.g.cs") -Content $refitSb.ToString()
+
+    # ───────────────────────────────────────
+    # 3. Generate Service interface
+    # ───────────────────────────────────────
+    $svcIfaceSb = [System.Text.StringBuilder]::new()
+    [void]$svcIfaceSb.AppendLine("// <auto-generated />")
+    [void]$svcIfaceSb.AppendLine('#nullable enable')
+    [void]$svcIfaceSb.AppendLine("using KoreForge.SwaggerControllers;")
+    [void]$svcIfaceSb.AppendLine("")
+    [void]$svcIfaceSb.AppendLine("namespace $ns;")
+    [void]$svcIfaceSb.AppendLine("")
+    [void]$svcIfaceSb.AppendLine("public interface I${apiName}Service")
+    [void]$svcIfaceSb.AppendLine("{")
+    foreach ($op in $meta.operations) {
+        [void]$svcIfaceSb.AppendLine("    Task<Outcome<$(Get-ResponseType $op)>> $($op.internalMethodName)($(Get-ServiceMethodParams $op));")
+        [void]$svcIfaceSb.AppendLine("")
+    }
+    [void]$svcIfaceSb.AppendLine("}")
+    Write-FileIfChanged -Path (Join-Path $genDir "I${apiName}Service.g.cs") -Content $svcIfaceSb.ToString()
+
+    # ───────────────────────────────────────
+    # 4. Generate Core Service
+    # ───────────────────────────────────────
+    $coreSb = [System.Text.StringBuilder]::new()
+    [void]$coreSb.AppendLine("// <auto-generated />")
+    [void]$coreSb.AppendLine('#nullable enable')
+    [void]$coreSb.AppendLine("using KoreForge.SwaggerControllers;")
+    [void]$coreSb.AppendLine("using Microsoft.Extensions.Logging;")
+    [void]$coreSb.AppendLine("")
+    [void]$coreSb.AppendLine("namespace $ns;")
+    [void]$coreSb.AppendLine("")
+    [void]$coreSb.AppendLine("internal sealed class ${apiName}Service : I${apiName}Service")
+    [void]$coreSb.AppendLine("{")
+    [void]$coreSb.AppendLine('    private const string ClassName = "' + $apiName + 'Service";')
+    [void]$coreSb.AppendLine("    private readonly I${apiName}ExternalClient _client;")
+    [void]$coreSb.AppendLine("    private readonly ILogger<${apiName}Service> _logger;")
+    [void]$coreSb.AppendLine("")
+    [void]$coreSb.AppendLine("    public ${apiName}Service(I${apiName}ExternalClient client, ILogger<${apiName}Service> logger)")
+    [void]$coreSb.AppendLine("    {")
+    [void]$coreSb.AppendLine("        _client = client;")
+    [void]$coreSb.AppendLine("        _logger = logger;")
+    [void]$coreSb.AppendLine("    }")
+    foreach ($op in $meta.operations) {
+        $respType   = Get-ResponseType $op
+        $methodName = $op.internalMethodName
+        $paramStr   = Get-ServiceMethodParams $op
+        $callArgs   = Get-RefitCallArgs $op
+        $opKey      = $op.operationKey
+
+        [void]$coreSb.AppendLine("")
+        [void]$coreSb.AppendLine("    public async Task<Outcome<$respType>> $methodName($paramStr)")
+        [void]$coreSb.AppendLine("    {")
+        [void]$coreSb.AppendLine("        var correlationId = Guid.NewGuid().ToString();")
+        [void]$coreSb.AppendLine("        try")
+        [void]$coreSb.AppendLine("        {")
+        [void]$coreSb.AppendLine("            var result = await _client.$($op.refitMethodName)($callArgs);")
+        [void]$coreSb.AppendLine("            return Outcome<$respType>.Ok(result, correlationId);")
+        [void]$coreSb.AppendLine("        }")
+        [void]$coreSb.AppendLine("        catch (Refit.ApiException ex)")
+        [void]$coreSb.AppendLine("        {")
+        [void]$coreSb.AppendLine('            _logger.LogExceptionStructured(ex, ClassName, "' + $methodName + '", "' + $opKey + '", correlationId,')
+        [void]$coreSb.AppendLine('                new Dictionary<string, object?>')
+        [void]$coreSb.AppendLine('                {')
+        [void]$coreSb.AppendLine('                    ["HttpStatusCode"] = (int)ex.StatusCode,')
+        [void]$coreSb.AppendLine('                    ["ReasonPhrase"] = ex.ReasonPhrase,')
+        [void]$coreSb.AppendLine('                    ["RequestUri"] = ex.Uri?.ToString()')
+        [void]$coreSb.AppendLine('                });')
+        [void]$coreSb.AppendLine("            var error = new ErrorInfo")
+        [void]$coreSb.AppendLine("            {")
+        [void]$coreSb.AppendLine("                Origin = ErrorOrigin.External,")
+        [void]$coreSb.AppendLine("                Kind = ex.StatusCode == System.Net.HttpStatusCode.Unauthorized || ex.StatusCode == System.Net.HttpStatusCode.Forbidden")
+        [void]$coreSb.AppendLine("                    ? ErrorKind.Authorization")
+        [void]$coreSb.AppendLine("                    : ErrorKind.Technical,")
+        [void]$coreSb.AppendLine("                Code = `"$($opKey)_FAILED`",")
+        [void]$coreSb.AppendLine("                Message = ex.Message,")
+        [void]$coreSb.AppendLine("                ExternalDetail = new ExternalErrorDetail")
+        [void]$coreSb.AppendLine("                {")
+        [void]$coreSb.AppendLine("                    DependencyName = `"$apiName`",")
+        [void]$coreSb.AppendLine("                    HttpStatusCode = (int)ex.StatusCode,")
+        [void]$coreSb.AppendLine("                    RawResponse = ex.Content")
+        [void]$coreSb.AppendLine("                }")
+        [void]$coreSb.AppendLine("            };")
+        [void]$coreSb.AppendLine("            return Outcome<$respType>.Fail(error, correlationId);")
+        [void]$coreSb.AppendLine("        }")
+        [void]$coreSb.AppendLine("        catch (Exception ex)")
+        [void]$coreSb.AppendLine("        {")
+        [void]$coreSb.AppendLine('            _logger.LogExceptionStructured(ex, ClassName, "' + $methodName + '", "' + $opKey + '", correlationId);')
+        [void]$coreSb.AppendLine("            var error = new ErrorInfo")
+        [void]$coreSb.AppendLine("            {")
+        [void]$coreSb.AppendLine("                Origin = ErrorOrigin.Internal,")
+        [void]$coreSb.AppendLine("                Kind = ErrorKind.Technical,")
+        [void]$coreSb.AppendLine("                Code = `"$($opKey)_INTERNAL_ERROR`",")
+        [void]$coreSb.AppendLine("                Message = ex.Message")
+        [void]$coreSb.AppendLine("            };")
+        [void]$coreSb.AppendLine("            return Outcome<$respType>.Fail(error, correlationId);")
+        [void]$coreSb.AppendLine("        }")
+        [void]$coreSb.AppendLine("    }")
+    }
+    [void]$coreSb.AppendLine("}")
+    Write-FileIfChanged -Path (Join-Path $genDir "${apiName}Service.g.cs") -Content $coreSb.ToString()
+
+    # ───────────────────────────────────────
+    # 5. Generate Logging Decorator
+    # ───────────────────────────────────────
+    $logSb = [System.Text.StringBuilder]::new()
+    [void]$logSb.AppendLine("// <auto-generated />")
+    [void]$logSb.AppendLine('#nullable enable')
+    [void]$logSb.AppendLine("using KoreForge.SwaggerControllers;")
+    [void]$logSb.AppendLine("using Microsoft.Extensions.Logging;")
+    [void]$logSb.AppendLine("")
+    [void]$logSb.AppendLine("namespace $ns;")
+    [void]$logSb.AppendLine("")
+    [void]$logSb.AppendLine("internal sealed class ${apiName}LoggingDecorator : I${apiName}Service")
+    [void]$logSb.AppendLine("{")
+    [void]$logSb.AppendLine('    private const string ClassName = "' + $apiName + 'LoggingDecorator";')
+    [void]$logSb.AppendLine("    private readonly I${apiName}Service _inner;")
+    [void]$logSb.AppendLine("    private readonly ILogger<${apiName}LoggingDecorator> _logger;")
+    [void]$logSb.AppendLine("")
+    [void]$logSb.AppendLine("    public ${apiName}LoggingDecorator(I${apiName}Service inner, ILogger<${apiName}LoggingDecorator> logger)")
+    [void]$logSb.AppendLine("    {")
+    [void]$logSb.AppendLine("        _inner = inner;")
+    [void]$logSb.AppendLine("        _logger = logger;")
+    [void]$logSb.AppendLine("    }")
+    foreach ($op in $meta.operations) {
+        $respType   = Get-ResponseType $op
+        $methodName = $op.internalMethodName
+        $paramStr   = Get-ServiceMethodParams $op
+        $callArgs   = Get-ServiceCallArgs $op
+        $opKey      = $op.operationKey
+
+        $scopeEntries = @()
+        $scopeEntries += '            ["ClassName"] = ClassName'
+        $scopeEntries += '            ["MethodName"] = "' + $methodName + '"'
+        $scopeEntries += '            ["OperationKey"] = "' + $opKey + '"'
+        foreach ($p in $op.parameters) {
+            if ($p.in -eq 'header') { continue }
+            if ($p.isBodyParam) {
+                $scopeEntries += '            ["RequestType"] = request.GetType().Name'
+                $scopeEntries += '            ["HasRequestBody"] = true'
+            } else {
+                $camel = $p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1)
+                $scopeEntries += '            ["' + $p.csharpName + '"] = ' + $camel
+            }
         }
-        $params.Add('CancellationToken cancellationToken = default')
-        $forwardArgs.Add('HttpContext.TraceIdentifier')
-        $forwardArgs.Add('cancellationToken')
 
-        [void]$sb.AppendLine((Format-XmlSummary $op.summary '    '))
-        [void]$sb.AppendLine("    [$verbAttr(`"$route`")]")
-        [void]$sb.AppendLine('    [Authorize]')
-        [void]$sb.AppendLine("    public async Task<IActionResult> $($op.name)($($params -join ', '))")
-        [void]$sb.AppendLine('    {')
-        [void]$sb.AppendLine("        var outcome = await _service.$($op.name)Async($($forwardArgs -join ', ')).ConfigureAwait(false);")
-        [void]$sb.AppendLine('        return outcome.ToActionResult();')
-        [void]$sb.AppendLine('    }')
+        $logParamTokens = @()
+        $logParamArgs   = @()
+        foreach ($p in $op.parameters) {
+            if ($p.in -eq 'header') { continue }
+            if ($p.isBodyParam) { continue }
+            $camel = $p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1)
+            $logParamTokens += "{$($p.csharpName)}"
+            $logParamArgs   += $camel
+        }
+        $paramLogTemplate = ''
+        $paramLogArgs     = ''
+        if ($logParamTokens.Count -gt 0) {
+            $paramLogTemplate = ' with ' + ($logParamTokens -join ', ')
+            $paramLogArgs     = ', ' + ($logParamArgs -join ', ')
+        }
+
+        [void]$logSb.AppendLine("")
+        [void]$logSb.AppendLine("    public async Task<Outcome<$respType>> $methodName($paramStr)")
+        [void]$logSb.AppendLine("    {")
+        [void]$logSb.AppendLine('        using var scope = _logger.BeginScope(new Dictionary<string, object?>')
+        [void]$logSb.AppendLine('        {')
+        foreach ($entry in $scopeEntries) {
+            [void]$logSb.AppendLine("$entry,")
+        }
+        [void]$logSb.AppendLine('        });')
+        [void]$logSb.AppendLine("")
+        [void]$logSb.AppendLine('        _logger.LogInformation(')
+        [void]$logSb.AppendLine('            "{ClassName}.{MethodName} invoking {OperationKey}' + $paramLogTemplate + '",')
+        [void]$logSb.AppendLine('            ClassName, "' + $methodName + '", "' + $opKey + '"' + $paramLogArgs + ');')
+        [void]$logSb.AppendLine("")
+        [void]$logSb.AppendLine("        var result = await _inner.$methodName($callArgs);")
+        [void]$logSb.AppendLine("")
+        [void]$logSb.AppendLine('        _logger.LogOutcomeStructured(result, ClassName, "' + $methodName + '", "' + $opKey + '");')
+        [void]$logSb.AppendLine("")
+        [void]$logSb.AppendLine("        return result;")
+        [void]$logSb.AppendLine("    }")
     }
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
-}
+    [void]$logSb.AppendLine("}")
+    Write-FileIfChanged -Path (Join-Path $genDir "${apiName}LoggingDecorator.g.cs") -Content $logSb.ToString()
 
-function Emit-Permissions {
-    param($Metadata, [string]$Namespace)
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('// <auto-generated/>')
-    [void]$sb.AppendLine('#nullable enable')
-    [void]$sb.AppendLine("namespace $Namespace;")
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine('public static class Permissions')
-    [void]$sb.AppendLine('{')
-    foreach ($op in $Metadata.operations) {
-        [void]$sb.AppendLine("    public const string $($op.name) = `"$Namespace.$($op.name)`";")
+    # ───────────────────────────────────────
+    # 6. Generate Controller
+    # ───────────────────────────────────────
+    $ctrlSb = [System.Text.StringBuilder]::new()
+    [void]$ctrlSb.AppendLine("// <auto-generated />")
+    [void]$ctrlSb.AppendLine('#nullable enable')
+    [void]$ctrlSb.AppendLine("using KoreForge.SwaggerControllers;")
+    [void]$ctrlSb.AppendLine('using Microsoft.AspNetCore.Authorization;')
+    [void]$ctrlSb.AppendLine("using Microsoft.AspNetCore.Mvc;")
+    [void]$ctrlSb.AppendLine("")
+    [void]$ctrlSb.AppendLine("namespace $ns;")
+    [void]$ctrlSb.AppendLine("")
+    [void]$ctrlSb.AppendLine("[ApiController]")
+    [void]$ctrlSb.AppendLine("[Route(`"api/$kebab/v$version`")]")
+    [void]$ctrlSb.AppendLine("public sealed class ${apiName}Controller : ControllerBase")
+    [void]$ctrlSb.AppendLine("{")
+    [void]$ctrlSb.AppendLine("    private readonly I${apiName}Service _service;")
+    [void]$ctrlSb.AppendLine("")
+    [void]$ctrlSb.AppendLine("    public ${apiName}Controller(I${apiName}Service service)")
+    [void]$ctrlSb.AppendLine("    {")
+    [void]$ctrlSb.AppendLine("        _service = service;")
+    [void]$ctrlSb.AppendLine("    }")
+    foreach ($op in $meta.operations) {
+        $respType   = Get-ResponseType $op
+        $methodName = $op.internalMethodName
+        $ctrlRoute  = $op.controllerRoute
+        $httpMethod = $op.httpMethod.ToUpper()
+        $callArgs   = Get-ServiceCallArgs $op
+        $permName   = $methodName -replace 'Async$', ''
+
+        $actionParams = @()
+        foreach ($p in $op.parameters) {
+            if ($p.in -eq 'header') { continue }
+            if ($p.isBodyParam) {
+                $actionParams += "[FromBody] $($p.csharpType) request"
+            } elseif ($p.in -eq 'path') {
+                $actionParams += "[FromRoute] $($p.csharpType) $($p.name)"
+            } elseif ($p.in -eq 'query') {
+                $camel = $p.csharpName.Substring(0,1).ToLower() + $p.csharpName.Substring(1)
+                $actionParams += "[FromQuery] $($p.csharpType) $camel"
+            }
+        }
+        $actionParams += "CancellationToken cancellationToken"
+        $actionParamStr = $actionParams -join ', '
+
+        $httpAttr = switch ($httpMethod) {
+            'GET'    { "HttpGet" }; 'POST'   { "HttpPost" }; 'PUT'    { "HttpPut" }
+            'DELETE' { "HttpDelete" }; 'PATCH'  { "HttpPatch" }; default  { "HttpGet" }
+        }
+
+        [void]$ctrlSb.AppendLine("")
+        [void]$ctrlSb.AppendLine("    [Authorize(Policy = Permissions.$permName)]")
+        [void]$ctrlSb.AppendLine("    [$httpAttr(`"$ctrlRoute`")]")
+        [void]$ctrlSb.AppendLine("    public async Task<IActionResult> $methodName($actionParamStr)")
+        [void]$ctrlSb.AppendLine("    {")
+        [void]$ctrlSb.AppendLine("        var outcome = await _service.$methodName($callArgs);")
+        [void]$ctrlSb.AppendLine("        return outcome.ToActionResult();")
+        [void]$ctrlSb.AppendLine("    }")
     }
-    [void]$sb.AppendLine('}')
-    return $sb.ToString()
-}
+    [void]$ctrlSb.AppendLine("}")
+    Write-FileIfChanged -Path (Join-Path $genDir "${apiName}Controller.g.cs") -Content $ctrlSb.ToString()
 
-function Emit-Csproj {
-    param([string]$ProjectName)
-@"
+    # ───────────────────────────────────────
+    # 7. Generate Permissions constants
+    # ───────────────────────────────────────
+    $permSb = [System.Text.StringBuilder]::new()
+    [void]$permSb.AppendLine("// <auto-generated />")
+    [void]$permSb.AppendLine('#nullable enable')
+    [void]$permSb.AppendLine("")
+    [void]$permSb.AppendLine("namespace $ns;")
+    [void]$permSb.AppendLine("")
+    [void]$permSb.AppendLine("/// <summary>")
+    [void]$permSb.AppendLine("/// Compile-time permission policy name constants for this API.")
+    [void]$permSb.AppendLine("/// Register these policies at startup to define authorization requirements.")
+    [void]$permSb.AppendLine("/// </summary>")
+    [void]$permSb.AppendLine("public static class Permissions")
+    [void]$permSb.AppendLine("{")
+    $allPermNames = @()
+    foreach ($op in $meta.operations) {
+        $permName   = $op.internalMethodName -replace 'Async$', ''
+        $policyName = "$apiName.V$version.$permName"
+        [void]$permSb.AppendLine("    public const string $permName = `"$policyName`";")
+        $allPermNames += $permName
+    }
+    [void]$permSb.AppendLine("")
+    [void]$permSb.AppendLine("    /// <summary>All permission policy names for this API.</summary>")
+    [void]$permSb.AppendLine("    public static readonly string[] All = [$($allPermNames -join ', ')];")
+    [void]$permSb.AppendLine("}")
+    Write-FileIfChanged -Path (Join-Path $genDir 'Permissions.g.cs') -Content $permSb.ToString()
+
+    # ───────────────────────────────────────
+    # 8. Scaffold ServiceCollectionExtensions (once)
+    # ───────────────────────────────────────
+    $diPath = Join-Path $projDir "ServiceCollectionExtensions.cs"
+    if (-not (Test-Path $diPath)) {
+        $diSb = [System.Text.StringBuilder]::new()
+        [void]$diSb.AppendLine("using KoreForge.SwaggerControllers;")
+        [void]$diSb.AppendLine("using Microsoft.AspNetCore.Mvc.ApplicationParts;")
+        [void]$diSb.AppendLine("using Microsoft.Extensions.DependencyInjection;")
+        [void]$diSb.AppendLine("using Microsoft.Extensions.Logging;")
+        [void]$diSb.AppendLine("using Refit;")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("namespace $ns;")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("public static class ServiceCollectionExtensions")
+        [void]$diSb.AppendLine("{")
+        [void]$diSb.AppendLine("    /// <summary>")
+        [void]$diSb.AppendLine("    /// Registers the $apiName V$version Refit client, auth handler, and decorator chain.")
+        [void]$diSb.AppendLine("    /// Scaffolded once — edit this file to adjust the decorator chain or base URL.")
+        [void]$diSb.AppendLine("    /// </summary>")
+        [void]$diSb.AppendLine("    public static IServiceCollection Add${apiName}V${version}Services(")
+        [void]$diSb.AppendLine("        this IServiceCollection services,")
+        [void]$diSb.AppendLine("        Action<ExternalAuthOptions> configureAuth,")
+        [void]$diSb.AppendLine("        Action<IHttpClientBuilder>? configureClient = null)")
+        [void]$diSb.AppendLine("    {")
+        [void]$diSb.AppendLine("        services.Configure(configureAuth);")
+        [void]$diSb.AppendLine("        services.AddTransient<AuthDelegatingHandler>();")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("        var clientBuilder = services")
+        [void]$diSb.AppendLine("            .AddRefitClient<I${apiName}ExternalClient>()")
+        [void]$diSb.AppendLine("            .ConfigureHttpClient(c => c.BaseAddress = new Uri(`"https://api.nedbank.co.za$basePath`"))")
+        [void]$diSb.AppendLine("            .AddHttpMessageHandler<AuthDelegatingHandler>();")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("        configureClient?.Invoke(clientBuilder);")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("        services.AddScoped<I${apiName}Service>(sp =>")
+        [void]$diSb.AppendLine("            new ${apiName}LoggingDecorator(")
+        [void]$diSb.AppendLine("                new ${apiName}BusinessDecorator(")
+        [void]$diSb.AppendLine("                    new ${apiName}PersistenceDecorator(")
+        [void]$diSb.AppendLine("                        new ${apiName}Service(")
+        [void]$diSb.AppendLine("                            sp.GetRequiredService<I${apiName}ExternalClient>(),")
+        [void]$diSb.AppendLine("                            sp.GetRequiredService<ILogger<${apiName}Service>>()))),")
+        [void]$diSb.AppendLine("                sp.GetRequiredService<ILogger<${apiName}LoggingDecorator>>()));")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("        return services;")
+        [void]$diSb.AppendLine("    }")
+        [void]$diSb.AppendLine("")
+        [void]$diSb.AppendLine("    public static IMvcBuilder Add${apiName}V${version}Controllers(this IMvcBuilder builder)")
+        [void]$diSb.AppendLine("    {")
+        [void]$diSb.AppendLine("        builder.PartManager.ApplicationParts.Add(")
+        [void]$diSb.AppendLine("            new AssemblyPart(typeof(${apiName}Controller).Assembly));")
+        [void]$diSb.AppendLine("        return builder;")
+        [void]$diSb.AppendLine("    }")
+        [void]$diSb.AppendLine("}")
+        Write-FileIfChanged -Path $diPath -Content $diSb.ToString()
+    }
+
+    # ───────────────────────────────────────
+    # 9. Scaffold BusinessDecorator (once)
+    # ───────────────────────────────────────
+    $businessPath = Join-Path $projDir "${apiName}BusinessDecorator.cs"
+    if (-not (Test-Path $businessPath)) {
+        $bSb = [System.Text.StringBuilder]::new()
+        [void]$bSb.AppendLine("using KoreForge.SwaggerControllers;")
+        [void]$bSb.AppendLine("")
+        [void]$bSb.AppendLine("namespace $ns;")
+        [void]$bSb.AppendLine("")
+        [void]$bSb.AppendLine("/// <summary>")
+        [void]$bSb.AppendLine("/// Business logic decorator — add validation, transformation, orchestration here.")
+        [void]$bSb.AppendLine("/// All methods pass through to the inner service by default.")
+        [void]$bSb.AppendLine("/// Scaffolded once and never overwritten by the generator.")
+        [void]$bSb.AppendLine("/// </summary>")
+        [void]$bSb.AppendLine("internal sealed class ${apiName}BusinessDecorator : I${apiName}Service")
+        [void]$bSb.AppendLine("{")
+        [void]$bSb.AppendLine("    private readonly I${apiName}Service _inner;")
+        [void]$bSb.AppendLine("")
+        [void]$bSb.AppendLine("    public ${apiName}BusinessDecorator(I${apiName}Service inner)")
+        [void]$bSb.AppendLine("    {")
+        [void]$bSb.AppendLine("        _inner = inner;")
+        [void]$bSb.AppendLine("    }")
+        foreach ($op in $meta.operations) {
+            [void]$bSb.AppendLine("")
+            [void]$bSb.AppendLine("    public Task<Outcome<$(Get-ResponseType $op)>> $($op.internalMethodName)($(Get-ServiceMethodParams $op))")
+            [void]$bSb.AppendLine("    {")
+            [void]$bSb.AppendLine("        // TODO: Add business rules, validation, or transformation logic")
+            [void]$bSb.AppendLine("        return _inner.$($op.internalMethodName)($(Get-ServiceCallArgs $op));")
+            [void]$bSb.AppendLine("    }")
+        }
+        [void]$bSb.AppendLine("}")
+        Write-FileIfChanged -Path $businessPath -Content $bSb.ToString()
+    }
+
+    # ───────────────────────────────────────
+    # 10. Scaffold PersistenceDecorator (once)
+    # ───────────────────────────────────────
+    $persistPath = Join-Path $projDir "${apiName}PersistenceDecorator.cs"
+    if (-not (Test-Path $persistPath)) {
+        $pSb = [System.Text.StringBuilder]::new()
+        [void]$pSb.AppendLine("using KoreForge.SwaggerControllers;")
+        [void]$pSb.AppendLine("")
+        [void]$pSb.AppendLine("namespace $ns;")
+        [void]$pSb.AppendLine("")
+        [void]$pSb.AppendLine("/// <summary>")
+        [void]$pSb.AppendLine("/// Persistence decorator — add auditing or DB writes here.")
+        [void]$pSb.AppendLine("/// All methods pass through to the inner service by default.")
+        [void]$pSb.AppendLine("/// </summary>")
+        [void]$pSb.AppendLine("internal sealed class ${apiName}PersistenceDecorator : I${apiName}Service")
+        [void]$pSb.AppendLine("{")
+        [void]$pSb.AppendLine("    private readonly I${apiName}Service _inner;")
+        [void]$pSb.AppendLine("")
+        [void]$pSb.AppendLine("    public ${apiName}PersistenceDecorator(I${apiName}Service inner)")
+        [void]$pSb.AppendLine("    {")
+        [void]$pSb.AppendLine("        _inner = inner;")
+        [void]$pSb.AppendLine("    }")
+        foreach ($op in $meta.operations) {
+            [void]$pSb.AppendLine("")
+            [void]$pSb.AppendLine("    public Task<Outcome<$(Get-ResponseType $op)>> $($op.internalMethodName)($(Get-ServiceMethodParams $op))")
+            [void]$pSb.AppendLine("    {")
+            [void]$pSb.AppendLine("        // TODO: Add persistence logic before/after the call")
+            [void]$pSb.AppendLine("        return _inner.$($op.internalMethodName)($(Get-ServiceCallArgs $op));")
+            [void]$pSb.AppendLine("    }")
+        }
+        [void]$pSb.AppendLine("}")
+        Write-FileIfChanged -Path $persistPath -Content $pSb.ToString()
+    }
+
+    # ───────────────────────────────────────
+    # 11. Generate .csproj (scaffold once)
+    # ───────────────────────────────────────
+    $csprojPath = Join-Path $projDir "$projName.csproj"
+    if (-not (Test-Path $csprojPath)) {
+        $csprojContent = @"
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <PackageId>$projName</PackageId>
+    <Description>$apiName V$version external API wrapper library.</Description>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <RootNamespace>$ProjectName</RootNamespace>
-    <AssemblyName>$ProjectName</AssemblyName>
-    <IsPackable>true</IsPackable>
   </PropertyGroup>
-
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="KoreForge.SwaggerControllers.Abstractions" />
     <PackageReference Include="Refit" />
     <PackageReference Include="Refit.HttpClientFactory" />
   </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
 </Project>
 "@
-}
-
-function Emit-DecoratorMethods {
-    param($Metadata, [string]$Comment)
-    $sb = [System.Text.StringBuilder]::new()
-    foreach ($op in $Metadata.operations) {
-        $combo = Get-ServiceParamList $op -IncludeForwardArgs
-        [void]$sb.AppendLine()
-        [void]$sb.AppendLine("    public $(Get-ServiceReturnType $op) $($op.name)Async($($combo.Params))")
-        [void]$sb.AppendLine("        // $Comment")
-        [void]$sb.AppendLine("        => _inner.$($op.name)Async($($combo.Args));")
-    }
-    return $sb.ToString().TrimEnd()
-}
-
-function Emit-ScaffoldDecorator {
-    param($Metadata, [string]$Namespace, [string]$Suffix, [string]$Comment, [string]$Doc)
-    $apiName = $Metadata.apiName
-    $methods = Emit-DecoratorMethods -Metadata $Metadata -Comment $Comment
-@"
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using KoreForge.SwaggerControllers;
-using $Namespace.Dtos;
-
-namespace $Namespace;
-
-/// <summary>
-/// $Doc
-/// </summary>
-internal sealed class ${apiName}${Suffix} : I${apiName}Service
-{
-    private readonly I${apiName}Service _inner;
-
-    public ${apiName}${Suffix}(I${apiName}Service inner)
-    {
-        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        Write-FileIfChanged -Path $csprojPath -Content $csprojContent
     }
 
-$methods
+    $projectRefs += $projName
+    Write-Host ""
 }
+
+# ───────────────────────────────────────────────
+# Test project
+# ───────────────────────────────────────────────
+Write-Host "=== Generating $testProjName ==="
+$testDir = Join-Path $tstDir $testProjName
+if (-not (Test-Path $testDir)) { New-Item -ItemType Directory -Path $testDir -Force | Out-Null }
+
+$testProjRefs = [System.Text.StringBuilder]::new()
+foreach ($ref in $projectRefs) {
+    [void]$testProjRefs.AppendLine("    <ProjectReference Include=`"..\..\src\$ref\$ref.csproj`" />")
+}
+
+$testCsproj = @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+$($testProjRefs.ToString().TrimEnd())
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+</Project>
 "@
-}
+Write-FileIfChanged -Path (Join-Path $testDir "$testProjName.csproj") -Content $testCsproj
 
-function Emit-ServiceCollectionExtensions {
-    param($Metadata, [string]$Namespace)
-    $apiName = $Metadata.apiName
-@"
-using System;
-using KoreForge.SwaggerControllers;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
-using Refit;
+foreach ($mf in $metadataFiles) {
+    $meta     = Get-Content $mf.FullName -Raw | ConvertFrom-Json
+    $ns       = $meta.namespace
+    $apiName  = $meta.apiName
+    $version  = $meta.folderVersion
 
-namespace $Namespace;
+    $testFileName = "${apiName}V${version}Tests.cs"
+    $testFilePath = Join-Path $testDir $testFileName
 
-public static class ServiceCollectionExtensions
-{
-    /// <summary>
-    /// Registers the Refit client, the leaf service, and the decorator chain
-    /// (Logging -&gt; Business -&gt; Persistence -&gt; Service) for $apiName.
-    /// </summary>
-    public static IServiceCollection Add${apiName}Services(
-        this IServiceCollection services,
-        Action<IHttpClientBuilder>? configureClient = null)
-    {
-        ArgumentNullException.ThrowIfNull(services);
-
-        var builder = services.AddRefitClient<I${apiName}ExternalClient>();
-        configureClient?.Invoke(builder);
-
-        services.TryAddSingleton<${apiName}Service>();
-        services.AddSingleton<I${apiName}Service>(sp =>
-        {
-            I${apiName}Service current = sp.GetRequiredService<${apiName}Service>();
-            current = ActivatorUtilities.CreateInstance<${apiName}PersistenceDecorator>(sp, current);
-            current = ActivatorUtilities.CreateInstance<${apiName}BusinessDecorator>(sp, current);
-            current = ActivatorUtilities.CreateInstance<${apiName}LoggingDecorator>(sp, current);
-            return current;
-        });
-
-        return services;
+    if (-not (Test-Path $testFilePath)) {
+        $tSb = [System.Text.StringBuilder]::new()
+        [void]$tSb.AppendLine("using KoreForge.SwaggerControllers;")
+        [void]$tSb.AppendLine("using Microsoft.Extensions.DependencyInjection;")
+        [void]$tSb.AppendLine("using Microsoft.Extensions.Logging;")
+        [void]$tSb.AppendLine("using Microsoft.Extensions.Logging.Abstractions;")
+        [void]$tSb.AppendLine("using NSubstitute;")
+        [void]$tSb.AppendLine("using $ns;")
+        [void]$tSb.AppendLine("using Xunit;")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("namespace $testProjName;")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("public class ${apiName}V${version}Tests")
+        [void]$tSb.AppendLine("{")
+        [void]$tSb.AppendLine("    [Fact]")
+        [void]$tSb.AppendLine("    public void DiRegistration_ResolvesService()")
+        [void]$tSb.AppendLine("    {")
+        [void]$tSb.AppendLine("        var services = new ServiceCollection();")
+        [void]$tSb.AppendLine("        services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));")
+        [void]$tSb.AppendLine("        services.Add${apiName}V${version}Services(opts =>")
+        [void]$tSb.AppendLine("        {")
+        [void]$tSb.AppendLine("            opts.Mode = AuthMode.ClientCredentials;")
+        [void]$tSb.AppendLine("            opts.ClientId = `"test-id`";")
+        [void]$tSb.AppendLine("            opts.ClientSecret = `"test-secret`";")
+        [void]$tSb.AppendLine("        });")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("        var provider = services.BuildServiceProvider();")
+        [void]$tSb.AppendLine("        var service = provider.GetService<I${apiName}Service>();")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("        Assert.NotNull(service);")
+        [void]$tSb.AppendLine("    }")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("    [Fact]")
+        [void]$tSb.AppendLine("    public void Outcome_Ok_ReturnsSuccess()")
+        [void]$tSb.AppendLine("    {")
+        [void]$tSb.AppendLine("        var outcome = Outcome<string>.Ok(`"data`", `"corr-123`");")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("        Assert.True(outcome.Success);")
+        [void]$tSb.AppendLine("        Assert.Equal(`"data`", outcome.Data);")
+        [void]$tSb.AppendLine("    }")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("    [Fact]")
+        [void]$tSb.AppendLine("    public void Outcome_Fail_ReturnsError()")
+        [void]$tSb.AppendLine("    {")
+        [void]$tSb.AppendLine("        var error = new ErrorInfo")
+        [void]$tSb.AppendLine("        {")
+        [void]$tSb.AppendLine("            Origin = ErrorOrigin.External,")
+        [void]$tSb.AppendLine("            Kind = ErrorKind.Technical,")
+        [void]$tSb.AppendLine("            Code = `"ERR`",")
+        [void]$tSb.AppendLine("            Message = `"fail`"")
+        [void]$tSb.AppendLine("        };")
+        [void]$tSb.AppendLine("        var outcome = Outcome<string>.Fail(error, `"corr-456`");")
+        [void]$tSb.AppendLine("")
+        [void]$tSb.AppendLine("        Assert.False(outcome.Success);")
+        [void]$tSb.AppendLine("        Assert.Equal(`"ERR`", outcome.Error!.Code);")
+        [void]$tSb.AppendLine("    }")
+        [void]$tSb.AppendLine("}")
+        Write-FileIfChanged -Path $testFilePath -Content $tSb.ToString()
     }
 }
+
+# ───────────────────────────────────────────────
+# Update .slnx
+# ───────────────────────────────────────────────
+Write-Host ""
+Write-Host "=== Updating solution file ==="
+
+$slnxFile = Get-ChildItem -Path $RepoRoot -Filter '*.slnx' -File | Select-Object -First 1
+if ($slnxFile) {
+    $srcProjLines = [System.Text.StringBuilder]::new()
+    foreach ($ref in $projectRefs) {
+        [void]$srcProjLines.AppendLine("    <Project Path=`"src/$ref/$ref.csproj`" />")
+    }
+
+    $slnxContent = @"
+<Solution>
+  <Folder Name="/src/">
+$($srcProjLines.ToString().TrimEnd())
+  </Folder>
+  <Folder Name="/tst/">
+    <Project Path="tst/$testProjName/$testProjName.csproj" />
+  </Folder>
+</Solution>
 "@
+    Write-FileIfChanged -Path $slnxFile.FullName -Content $slnxContent
+    Write-Host "  Solution: $($slnxFile.FullName)"
 }
 
-# ----------------------------------------------------------------------------
-# Main loop
-# ----------------------------------------------------------------------------
-
-$writeCount = 0
-$skipCount = 0
-
-foreach ($metadataFile in $metadataFiles) {
-    Write-Host "Processing $($metadataFile.FullName)" -ForegroundColor Cyan
-    $metadata = Get-Content -Raw -Path $metadataFile.FullName | ConvertFrom-Json -Depth 100
-
-    if (-not $metadata.apiName) { throw "metadata.json missing apiName: $($metadataFile.FullName)" }
-    if (-not $metadata.version) { throw "metadata.json missing version: $($metadataFile.FullName)" }
-
-    $apiName = $metadata.apiName
-    $version = [int]$metadata.version
-    $projectName  = "$RootNamespace.$apiName.V$version"
-    $namespace    = $projectName
-    $projectDir   = Join-Path $srcRoot $projectName
-    $generatedDir = Join-Path $projectDir 'Generated'
-    $dtosDir      = Join-Path $generatedDir 'Dtos'
-
-    if (Test-Path $generatedDir) { Remove-Item $generatedDir -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $dtosDir | Out-Null
-
-    foreach ($dto in $metadata.dtos) {
-        $path = Join-Path $dtosDir "$($dto.name).g.cs"
-        if (Write-FileIfChanged -Path $path -Content (Emit-Dto -Dto $dto -Namespace $namespace)) { $writeCount++ } else { $skipCount++ }
-    }
-
-    $emits = @{
-        "I${apiName}ExternalClient.g.cs"  = (Emit-RefitClient        -Metadata $metadata -Namespace $namespace)
-        "I${apiName}Service.g.cs"         = (Emit-ServiceInterface   -Metadata $metadata -Namespace $namespace)
-        "${apiName}Service.g.cs"          = (Emit-ServiceImpl        -Metadata $metadata -Namespace $namespace)
-        "${apiName}LoggingDecorator.g.cs" = (Emit-LoggingDecorator   -Metadata $metadata -Namespace $namespace)
-        "${apiName}Controller.g.cs"       = (Emit-Controller         -Metadata $metadata -Namespace $namespace -Version $version)
-        'Permissions.g.cs'                = (Emit-Permissions        -Metadata $metadata -Namespace $namespace)
-    }
-    foreach ($entry in $emits.GetEnumerator()) {
-        $path = Join-Path $generatedDir $entry.Key
-        if (Write-FileIfChanged -Path $path -Content $entry.Value) { $writeCount++ } else { $skipCount++ }
-    }
-
-    $scaffold = @{
-        "$projectName.csproj"               = (Emit-Csproj -ProjectName $projectName)
-        'ServiceCollectionExtensions.cs'    = (Emit-ServiceCollectionExtensions -Metadata $metadata -Namespace $namespace)
-        "${apiName}BusinessDecorator.cs"    = (Emit-ScaffoldDecorator -Metadata $metadata -Namespace $namespace -Suffix 'BusinessDecorator'    -Comment 'TODO: business rules.'    -Doc 'Hand-written business-rule decorator. Pass-through by default; add validation, authorization, or cross-API orchestration here.')
-        "${apiName}PersistenceDecorator.cs" = (Emit-ScaffoldDecorator -Metadata $metadata -Namespace $namespace -Suffix 'PersistenceDecorator' -Comment 'TODO: persistence/audit.' -Doc 'Hand-written persistence/audit decorator. Pass-through by default; add audit rows, idempotency keys, or transactional behavior here.')
-    }
-    foreach ($entry in $scaffold.GetEnumerator()) {
-        $path = Join-Path $projectDir $entry.Key
-        if (Write-FileOnce -Path $path -Content $entry.Value) { $writeCount++ } else { $skipCount++ }
-    }
-}
-
-Write-Host "Generated $writeCount file(s); $skipCount unchanged." -ForegroundColor Green
+Write-Host ""
+Write-Host "=== Generation complete! ==="
+Write-Host "  API projects: $($projectRefs.Count)"
+Write-Host "  Test project: $testProjName"

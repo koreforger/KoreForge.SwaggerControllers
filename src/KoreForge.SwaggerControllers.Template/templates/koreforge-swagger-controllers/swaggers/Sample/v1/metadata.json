@@ -1,107 +1,103 @@
 {
   "apiName": "Sample",
-  "version": 1,
+  "folderVersion": 1,
+  "kebabName": "sample",
+  "projectName": "Sample.Test.Sample.V1",
+  "namespace": "Sample.Test.Sample.V1",
   "basePath": "/sample/v1",
+  "auth": {
+    "hasClientId": false,
+    "hasClientSecret": false,
+    "clientIdHeader": "X-IBM-Client-Id",
+    "clientSecretHeader": "X-IBM-Client-Secret",
+    "hasJwt": false,
+    "jwtHeader": "Authorization"
+  },
   "operations": [
     {
-      "name": "ListWidgets",
+      "operationKey": "ListWidgets",
+      "operationId": "ListWidgets",
       "httpMethod": "GET",
-      "route": "widgets",
-      "summary": "List widgets.",
+      "pathTemplate": "/widgets",
+      "internalMethodName": "ListWidgetsAsync",
+      "refitMethodName": "ListWidgetsAsync",
+      "controllerRoute": "widgets",
+      "tags": ["Sample"],
       "parameters": [
         {
           "name": "pageSize",
-          "originalName": "pageSize",
+          "csharpName": "PageSize",
+          "csharpType": "int?",
           "in": "query",
           "required": false,
-          "type": "int",
-          "description": ""
+          "isBodyParam": false
         }
       ],
-      "requestBody": null,
-      "responses": [
-        {
-          "statusCode": 200,
-          "type": "IReadOnlyList<Widget>",
-          "description": "OK"
-        }
-      ],
-      "successResponse": {
-        "statusCode": 200,
-        "type": "IReadOnlyList<Widget>"
-      },
-      "headers": []
+      "requestBodyDtoRef": null,
+      "successResponseDtoRef": "IReadOnlyList<Widget>",
+      "successStatusCode": 200
     },
     {
-      "name": "CreateWidget",
+      "operationKey": "CreateWidget",
+      "operationId": "CreateWidget",
       "httpMethod": "POST",
-      "route": "widgets",
-      "summary": "Create a widget.",
-      "parameters": [],
-      "requestBody": {
-        "type": "WidgetRequest",
-        "required": true,
-        "description": ""
-      },
-      "responses": [
+      "pathTemplate": "/widgets",
+      "internalMethodName": "CreateWidgetAsync",
+      "refitMethodName": "CreateWidgetAsync",
+      "controllerRoute": "widgets",
+      "tags": ["Sample"],
+      "parameters": [
         {
-          "statusCode": 201,
-          "type": "Widget",
-          "description": "Created"
+          "name": "request",
+          "csharpName": "Request",
+          "csharpType": "WidgetRequest",
+          "in": "body",
+          "required": true,
+          "isBodyParam": true
         }
       ],
-      "successResponse": {
-        "statusCode": 201,
-        "type": "Widget"
-      },
-      "headers": []
+      "requestBodyDtoRef": "WidgetRequest",
+      "successResponseDtoRef": "Widget",
+      "successStatusCode": 201
     },
     {
-      "name": "GetWidget",
+      "operationKey": "GetWidget",
+      "operationId": "GetWidget",
       "httpMethod": "GET",
-      "route": "widgets/{id}",
-      "summary": "Fetch a widget by id.",
+      "pathTemplate": "/widgets/{id}",
+      "internalMethodName": "GetWidgetAsync",
+      "refitMethodName": "GetWidgetAsync",
+      "controllerRoute": "widgets/{id}",
+      "tags": ["Sample"],
       "parameters": [
         {
           "name": "id",
-          "originalName": "id",
+          "csharpName": "Id",
+          "csharpType": "string",
           "in": "path",
           "required": true,
-          "type": "string",
-          "description": ""
+          "isBodyParam": false
         }
       ],
-      "requestBody": null,
-      "responses": [
-        {
-          "statusCode": 200,
-          "type": "Widget",
-          "description": "OK"
-        }
-      ],
-      "successResponse": {
-        "statusCode": 200,
-        "type": "Widget"
-      },
-      "headers": []
+      "requestBodyDtoRef": null,
+      "successResponseDtoRef": "Widget",
+      "successStatusCode": 200
     }
   ],
   "dtos": [
     {
-      "name": "Widget",
-      "summary": "",
+      "csharpName": "Widget",
       "properties": [
-        { "name": "Id",          "originalName": "id",          "type": "string", "required": true,  "description": "" },
-        { "name": "Name",        "originalName": "name",        "type": "string", "required": true,  "description": "" },
-        { "name": "Description", "originalName": "description", "type": "string", "required": false, "description": "" }
+        { "csharpName": "Id", "jsonName": "id", "csharpType": "string", "required": true },
+        { "csharpName": "Name", "jsonName": "name", "csharpType": "string", "required": true },
+        { "csharpName": "Description", "jsonName": "description", "csharpType": "string?", "required": false }
       ]
     },
     {
-      "name": "WidgetRequest",
-      "summary": "",
+      "csharpName": "WidgetRequest",
       "properties": [
-        { "name": "Name",        "originalName": "name",        "type": "string", "required": true,  "description": "" },
-        { "name": "Description", "originalName": "description", "type": "string", "required": false, "description": "" }
+        { "csharpName": "Name", "jsonName": "name", "csharpType": "string", "required": true },
+        { "csharpName": "Description", "jsonName": "description", "csharpType": "string?", "required": false }
       ]
     }
   ]

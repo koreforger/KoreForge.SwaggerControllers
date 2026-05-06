@@ -19,7 +19,13 @@ public class OutcomeTests
     [Fact]
     public void Fail_carries_error_and_correlation_id()
     {
-        var error = new ErrorInfo(ErrorOrigin.Internal, ErrorKind.Logical, "nope");
+        var error = new ErrorInfo
+        {
+            Origin = ErrorOrigin.Internal,
+            Kind = ErrorKind.Logical,
+            Code = "LOGICAL",
+            Message = "nope"
+        };
 
         var outcome = Outcome<int>.Fail(error, "abc");
 
@@ -28,23 +34,5 @@ public class OutcomeTests
         outcome.Error.Should().BeSameAs(error);
         outcome.CorrelationId.Should().Be("abc");
     }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    [InlineData(null)]
-    public void Ok_rejects_blank_correlation_id(string? correlationId)
-    {
-        Action act = () => Outcome<int>.Ok(1, correlationId!);
-
-        act.Should().Throw<ArgumentException>();
-    }
-
-    [Fact]
-    public void Fail_rejects_null_error()
-    {
-        Action act = () => Outcome<int>.Fail(null!, "abc");
-
-        act.Should().Throw<ArgumentNullException>();
-    }
 }
+
